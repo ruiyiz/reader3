@@ -12,8 +12,11 @@
         .book-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); transition: transform 0.2s; }
         .book-title { font-size: 1.2em; font-weight: bold; color: #2c3e50; margin-bottom: 10px; }
         .book-meta { color: #666; font-size: 0.9em; margin-bottom: 15px; }
-        .btn { display: inline-block; background: #3498db; color: white; text-decoration: none; padding: 8px 15px; border-radius: 4px; font-size: 0.9em; }
+        .btn { display: inline-block; background: #3498db; color: white; text-decoration: none; padding: 8px 15px; border-radius: 4px; font-size: 0.9em; border: none; cursor: pointer; }
         .btn:hover { background: #2980b9; }
+        .btn-delete { background: #e74c3c; margin-left: 10px; }
+        .btn-delete:hover { background: #c0392b; }
+        .book-actions { margin-top: 10px; }
     </style>
 </head>
 <body>
@@ -35,10 +38,35 @@
                     {{ book.author }}<br>
                     {{ book.chapters }} sections
                 </div>
-                <a href="/read/{{ book.id }}/0" class="btn">Read Book</a>
+                <div class="book-actions">
+                    <a href="/read/{{ book.id }}/0" class="btn">Read Book</a>
+                    <button class="btn btn-delete" onclick="deleteBook('{{ book.id }}', '{{ book.title }}')">Delete</button>
+                </div>
             </div>
             {% endfor %}
         </div>
     </div>
+    <script>
+        async function deleteBook(bookId, bookTitle) {
+            if (!confirm(`Are you sure you want to delete "${bookTitle}"? This action cannot be undone.`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/delete/${bookId}`, {
+                    method: 'DELETE'
+                });
+
+                if (response.ok) {
+                    window.location.reload();
+                } else {
+                    const error = await response.json();
+                    alert(`Error deleting book: ${error.detail || 'Unknown error'}`);
+                }
+            } catch (error) {
+                alert(`Error deleting book: ${error.message}`);
+            }
+        }
+    </script>
 </body>
 </html>

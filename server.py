@@ -162,6 +162,34 @@ async def upload_book(file: UploadFile = File(...)):
             os.unlink(tmp_path)
         raise HTTPException(status_code=500, detail=f"Error processing book: {str(e)}")
 
+@app.delete("/delete/{book_id}")
+async def delete_book(book_id: str):
+    """
+    Delete a book by removing its data folder.
+    """
+    # Security check: ensure book_id is clean
+    safe_book_id = os.path.basename(book_id)
+
+    # Ensure it ends with _data
+    if not safe_book_id.endswith("_data"):
+        raise HTTPException(status_code=400, detail="Invalid book ID")
+
+    book_path = os.path.join(BOOKS_DIR, safe_book_id)
+
+    if not os.path.exists(book_path) or not os.path.isdir(book_path):
+        raise HTTPException(status_code=404, detail="Book not found")
+
+    try:
+        # Remove the entire book folder
+        shutil.rmtree(book_path)
+
+        # Clear the cache
+        load_book_cached.cache_clear()
+
+        return {"success": True, "message": f"Book {safe_book_id} deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting book: {str(e)}")
+
 if __name__ == "__main__":
     import uvicorn
     print("Starting server at http://127.0.0.1:8123")
