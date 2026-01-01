@@ -172,6 +172,91 @@ def extract_metadata_robust(book_obj) -> BookMetadata:
 
 # --- Main Conversion Logic ---
 
+def split_chapter_by_anchors(chapter_content: str, toc_entries: List[TOCEntry], soup: BeautifulSoup) -> List[tuple]:
+    """
+    Splits a chapter's HTML content into multiple sections based on TOC anchor positions.
+    Returns list of (anchor_id, title, html_content, text_content) tuples.
+    """
+    if not toc_entries:
+        return []
+
+    # Find anchor elements and their positions
+    anchor_positions = []
+    all_elements = list(soup.descendants)
+
+    for toc_entry in toc_entries:
+        if toc_entry.anchor:
+            # Find element with this ID
+            anchor_elem = soup.find(id=toc_entry.anchor)
+            if anchor_elem:
+                try:
+                    pos = all_elements.index(anchor_elem)
+                    anchor_positions.append((pos, anchor_elem, toc_entry))
+                except ValueError:
+                    pass
+
+    if not anchor_positions:
+        return []
+
+    # Sort by position in document
+    anchor_positions.sort(key=lambda x: x[0])
+
+    # Get body content as a single string
+    body = soup.find('body')
+    if not body:
+        body = soup
+
+    body_html = str(body)
+
+    # Split content by finding anchor markers in the HTML
+    sections = []
+
+    for idx, (pos, anchor_elem, toc_entry) in enumerate(anchor_positions):
+        anchor_id = toc_entry.anchor
+
+        # Find where this anchor appears in the HTML
+        anchor_marker = f'id="{anchor_id}"'
+        start_pos = body_html.find(anchor_marker)
+
+        if start_pos == -1:
+            # Try with single quotes
+            anchor_marker = f"id='{anchor_id}'"
+            start_pos = body_html.find(anchor_marker)
+
+        if start_pos == -1:
+            continue
+
+        # Find the start of this section (back up to the opening tag)
+        tag_start = body_html.rfind('<', 0, start_pos)
+
+        # Find where the next section starts (or end of content)
+        if idx + 1 < len(anchor_positions):
+            next_anchor_id = anchor_positions[idx + 1][2].anchor
+            next_marker = f'id="{next_anchor_id}"'
+            end_pos = body_html.find(next_marker)
+            if end_pos == -1:
+                next_marker = f"id='{next_anchor_id}'"
+                end_pos = body_html.find(next_marker)
+            if end_pos != -1:
+                end_pos = body_html.rfind('<', 0, end_pos)
+            else:
+                end_pos = len(body_html)
+        else:
+            # Last section - take everything until end
+            end_pos = len(body_html)
+
+        # Extract section HTML
+        section_html = body_html[tag_start:end_pos]
+
+        # Parse and extract text
+        section_soup = BeautifulSoup(section_html, 'html.parser')
+        section_text = extract_plain_text(section_soup)
+
+        sections.append((anchor_id, toc_entry.title, section_html, section_text))
+
+    return sections
+
+
 def process_epub(epub_path: str, output_dir: str) -> Book:
 
     # 1. Load Book
@@ -216,6 +301,17 @@ def process_epub(epub_path: str, output_dir: str) -> Book:
         print("Warning: Empty TOC, building fallback from Spine...")
         toc_structure = get_fallback_toc(book)
 
+    # 5b. Build a flat list of all TOC entries for lookup
+    def flatten_toc(toc_list: List[TOCEntry]) -> List[TOCEntry]:
+        result = []
+        for entry in toc_list:
+            result.append(entry)
+            if entry.children:
+                result.extend(flatten_toc(entry.children))
+        return result
+
+    flat_toc = flatten_toc(toc_structure)
+
     # 6. Process Content (Spine-based to preserve HTML validity)
     print("Processing chapters...")
     spine_chapters = []
@@ -251,24 +347,48 @@ def process_epub(epub_path: str, output_dir: str) -> Book:
             # B. Clean HTML
             soup = clean_html_content(soup)
 
-            # C. Extract Body Content only
-            body = soup.find('body')
-            if body:
-                # Extract inner HTML of body
-                final_html = "".join([str(x) for x in body.contents])
-            else:
-                final_html = str(soup)
+            # C. Check if this file has multiple TOC entries with anchors
+            file_href = item.get_name()
+            toc_entries = [t for t in flat_toc if t.file_href == file_href and t.anchor]
 
-            # D. Create Object
-            chapter = ChapterContent(
-                id=item_id,
-                href=item.get_name(), # Important: This links TOC to Content
-                title=f"Section {i+1}", # Fallback, real titles come from TOC
-                content=final_html,
-                text=extract_plain_text(soup),
-                order=i
-            )
-            spine_chapters.append(chapter)
+            if len(toc_entries) > 1:
+                # Split this file into multiple chapters
+                print(f"  Splitting {file_href} into {len(toc_entries)} sections...")
+                sections = split_chapter_by_anchors(raw_content, toc_entries, soup)
+
+                for section_idx, (anchor, title, section_html, section_text) in enumerate(sections):
+                    chapter = ChapterContent(
+                        id=f"{item_id}#{anchor}",
+                        href=f"{file_href}#{anchor}",
+                        title=title,
+                        content=section_html,
+                        text=section_text,
+                        order=len(spine_chapters)
+                    )
+                    spine_chapters.append(chapter)
+            else:
+                # D. Extract Body Content only (single section)
+                body = soup.find('body')
+                if body:
+                    # Extract inner HTML of body
+                    final_html = "".join([str(x) for x in body.contents])
+                else:
+                    final_html = str(soup)
+
+                # E. Create Object
+                # Try to find a TOC entry for this file to get a better title
+                matching_toc = next((t for t in flat_toc if t.file_href == file_href), None)
+                title = matching_toc.title if matching_toc else f"Section {i+1}"
+
+                chapter = ChapterContent(
+                    id=item_id,
+                    href=item.get_name(),
+                    title=title,
+                    content=final_html,
+                    text=extract_plain_text(soup),
+                    order=len(spine_chapters)
+                )
+                spine_chapters.append(chapter)
 
     # 7. Final Assembly
     final_book = Book(
