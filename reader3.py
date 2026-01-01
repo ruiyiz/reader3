@@ -13,6 +13,7 @@ from urllib.parse import unquote
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup, Comment
+import fitz  # PyMuPDF
 
 # --- Data structures ---
 
@@ -403,6 +404,162 @@ def process_epub(epub_path: str, output_dir: str) -> Book:
     return final_book
 
 
+def process_pdf(pdf_path: str, output_dir: str) -> Book:
+    """
+    Process a PDF file into a Book object.
+    Attempts to extract TOC/bookmarks, falls back to page-based chunking if unavailable.
+    """
+    print(f"Loading {pdf_path}...")
+    doc = fitz.open(pdf_path)
+
+    # 1. Extract Metadata
+    metadata_dict = doc.metadata
+    title = metadata_dict.get('title', os.path.splitext(os.path.basename(pdf_path))[0])
+    if not title or title.strip() == '':
+        title = os.path.splitext(os.path.basename(pdf_path))[0]
+
+    author = metadata_dict.get('author', 'Unknown')
+    authors = [author] if author else []
+
+    metadata = BookMetadata(
+        title=title,
+        language="en",
+        authors=authors,
+        description=metadata_dict.get('subject'),
+        publisher=metadata_dict.get('producer'),
+        date=metadata_dict.get('creationDate')
+    )
+
+    # 2. Prepare Output Directory
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+    images_dir = os.path.join(output_dir, 'images')
+    os.makedirs(images_dir, exist_ok=True)
+
+    # 3. Try to Extract TOC/Outline
+    print("Extracting Table of Contents...")
+    toc_outline = doc.get_toc(simple=False)
+
+    spine_chapters = []
+    toc_structure = []
+
+    if toc_outline and len(toc_outline) > 0:
+        # TOC exists - use it to create chapters
+        print(f"Found {len(toc_outline)} TOC entries")
+
+        # Build chapter ranges from TOC
+        chapter_ranges = []
+        for i, entry in enumerate(toc_outline):
+            # TOC entries can have 3 or 4 elements: [level, title, page] or [level, title, page, dest]
+            level, title, page_num = entry[0], entry[1], entry[2]
+            start_page = page_num - 1  # fitz uses 0-based indexing
+
+            # Find end page (start of next entry at same or higher level)
+            end_page = len(doc) - 1
+            for j in range(i + 1, len(toc_outline)):
+                next_entry = toc_outline[j]
+                next_level, next_page = next_entry[0], next_entry[2]
+                if next_level <= level:
+                    end_page = next_page - 2
+                    break
+
+            chapter_ranges.append({
+                'level': level,
+                'title': title,
+                'start': start_page,
+                'end': end_page,
+                'order': i
+            })
+
+        # Create ChapterContent objects from TOC entries
+        for i, chapter_info in enumerate(chapter_ranges):
+            text_parts = []
+            html_parts = ["<div>"]
+
+            for page_num in range(chapter_info['start'], chapter_info['end'] + 1):
+                if page_num < 0 or page_num >= len(doc):
+                    continue
+                page = doc[page_num]
+                page_text = page.get_text()
+                text_parts.append(page_text)
+                html_parts.append(f"<p>{page_text.replace(chr(10), '<br>')}</p>")
+
+            html_parts.append("</div>")
+
+            chapter = ChapterContent(
+                id=f"chapter_{i}",
+                href=f"chapter_{i}.html",
+                title=chapter_info['title'],
+                content="".join(html_parts),
+                text=" ".join(text_parts),
+                order=i
+            )
+            spine_chapters.append(chapter)
+
+            # Build TOC structure (flat for now - nested TOC would be more complex)
+            toc_entry = TOCEntry(
+                title=chapter_info['title'],
+                href=f"chapter_{i}.html",
+                file_href=f"chapter_{i}.html",
+                anchor=""
+            )
+            toc_structure.append(toc_entry)
+
+    else:
+        # No TOC - fall back to page-based chunking
+        print("No TOC found, using page-based chunking...")
+        pages_per_chapter = 10
+        total_pages = len(doc)
+
+        for chunk_start in range(0, total_pages, pages_per_chapter):
+            chunk_end = min(chunk_start + pages_per_chapter, total_pages)
+            chapter_num = chunk_start // pages_per_chapter
+
+            text_parts = []
+            html_parts = ["<div>"]
+
+            for page_num in range(chunk_start, chunk_end):
+                page = doc[page_num]
+                page_text = page.get_text()
+                text_parts.append(page_text)
+                html_parts.append(f"<p>{page_text.replace(chr(10), '<br>')}</p>")
+
+            html_parts.append("</div>")
+
+            title = f"Pages {chunk_start + 1}-{chunk_end}"
+            chapter = ChapterContent(
+                id=f"chapter_{chapter_num}",
+                href=f"chapter_{chapter_num}.html",
+                title=title,
+                content="".join(html_parts),
+                text=" ".join(text_parts),
+                order=chapter_num
+            )
+            spine_chapters.append(chapter)
+
+            toc_entry = TOCEntry(
+                title=title,
+                href=f"chapter_{chapter_num}.html",
+                file_href=f"chapter_{chapter_num}.html",
+                anchor=""
+            )
+            toc_structure.append(toc_entry)
+
+    doc.close()
+
+    # 4. Create Book object
+    final_book = Book(
+        metadata=metadata,
+        spine=spine_chapters,
+        toc=toc_structure,
+        images={},  # PDF image extraction can be added later if needed
+        source_file=os.path.basename(pdf_path),
+        processed_at=datetime.now().isoformat()
+    )
+
+    return final_book
+
+
 def save_to_pickle(book: Book, output_dir: str):
     p_path = os.path.join(output_dir, 'book.pkl')
     with open(p_path, 'wb') as f:
@@ -416,14 +573,26 @@ if __name__ == "__main__":
 
     import sys
     if len(sys.argv) < 2:
-        print("Usage: python reader3.py <file.epub>")
+        print("Usage: python reader3.py <file.epub|file.pdf>")
         sys.exit(1)
 
-    epub_file = sys.argv[1]
-    assert os.path.exists(epub_file), "File not found."
-    out_dir = os.path.splitext(epub_file)[0] + "_data"
+    input_file = sys.argv[1]
+    assert os.path.exists(input_file), "File not found."
 
-    book_obj = process_epub(epub_file, out_dir)
+    # Detect file type
+    file_ext = os.path.splitext(input_file)[1].lower()
+    out_dir = os.path.splitext(input_file)[0] + "_data"
+
+    # Process based on file type
+    if file_ext == '.epub':
+        book_obj = process_epub(input_file, out_dir)
+    elif file_ext == '.pdf':
+        book_obj = process_pdf(input_file, out_dir)
+    else:
+        print(f"Unsupported file type: {file_ext}")
+        print("Supported formats: .epub, .pdf")
+        sys.exit(1)
+
     save_to_pickle(book_obj, out_dir)
     print("\n--- Summary ---")
     print(f"Title: {book_obj.metadata.title}")

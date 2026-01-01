@@ -1,14 +1,16 @@
 import os
 import pickle
+import tempfile
+import shutil
 from functools import lru_cache
 from typing import Optional
 
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi import FastAPI, Request, HTTPException, UploadFile, File
+from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from reader3 import Book, BookMetadata, ChapterContent, TOCEntry
+from reader3 import Book, BookMetadata, ChapterContent, TOCEntry, process_epub, process_pdf, save_to_pickle
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
@@ -103,6 +105,62 @@ async def serve_image(book_id: str, image_name: str):
         raise HTTPException(status_code=404, detail="Image not found")
 
     return FileResponse(img_path)
+
+@app.get("/upload", response_class=HTMLResponse)
+async def upload_page(request: Request):
+    """Display the upload form."""
+    return templates.TemplateResponse("upload.html", {"request": request})
+
+@app.post("/upload")
+async def upload_book(file: UploadFile = File(...)):
+    """
+    Handle book upload and processing.
+    Accepts EPUB or PDF files, processes them, and redirects to library.
+    """
+    # Validate file type
+    filename = file.filename
+    file_ext = os.path.splitext(filename)[1].lower()
+
+    if file_ext not in ['.epub', '.pdf']:
+        raise HTTPException(status_code=400, detail="Only EPUB and PDF files are supported")
+
+    try:
+        # Create a temporary file to save the upload
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
+            # Read and write the uploaded file
+            content = await file.read()
+            tmp_file.write(content)
+            tmp_path = tmp_file.name
+
+        # Determine output directory
+        base_name = os.path.splitext(filename)[0]
+        # Sanitize filename for directory name
+        safe_base_name = "".join([c for c in base_name if c.isalnum() or c in (' ', '-', '_')]).strip()
+        out_dir = os.path.join(BOOKS_DIR, f"{safe_base_name}_data")
+
+        # Process based on file type
+        if file_ext == '.epub':
+            book_obj = process_epub(tmp_path, out_dir)
+        elif file_ext == '.pdf':
+            book_obj = process_pdf(tmp_path, out_dir)
+
+        # Save to pickle
+        save_to_pickle(book_obj, out_dir)
+
+        # Clean up temporary file
+        os.unlink(tmp_path)
+
+        # Clear the cache so the new book appears
+        load_book_cached.cache_clear()
+
+        # Redirect to library
+        return RedirectResponse(url="/", status_code=303)
+
+    except Exception as e:
+        # Clean up on error
+        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise HTTPException(status_code=500, detail=f"Error processing book: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

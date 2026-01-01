@@ -19,9 +19,12 @@
 <body>
     <div class="container">
         <h1>Library</h1>
+        <div style="margin-bottom: 20px;">
+            <a href="/upload" class="btn">Upload Book</a>
+        </div>
 
         {% if not books %}
-            <p>No processed books found. Run <code>reader3.py</code> on an epub first.</p>
+            <p>No processed books found. Upload a book or run <code>reader3.py</code> on an epub/pdf file.</p>
         {% endif %}
 
         <div class="book-grid">
