@@ -8,6 +8,32 @@ This project was 90% vibe coded just to illustrate how one can very easily [read
 
 ## Usage
 
+### Option 1: Docker (Recommended)
+
+The easiest way to run reader3 is with Docker:
+
+```bash
+# Build and start the container
+docker-compose up -d
+
+# Access the app at http://localhost:8123
+# Or from other devices on your network at http://YOUR_IP:8123
+```
+
+You can upload EPUB files directly through the web interface at http://localhost:8123/upload, or process them manually:
+
+```bash
+# Process an EPUB file
+docker exec reader3 python reader3.py /app/dracula.epub
+```
+
+To stop the server:
+```bash
+docker-compose down
+```
+
+### Option 2: Local Installation
+
 The project uses [uv](https://docs.astral.sh/uv/). So for example, download [Dracula EPUB3](https://www.gutenberg.org/ebooks/345) to this directory as `dracula.epub`, then:
 
 ```bash

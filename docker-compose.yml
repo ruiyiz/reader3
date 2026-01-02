@@ -1,0 +1,13 @@
+services:
+  reader3:
+    build: .
+    container_name: reader3
+    ports:
+      - "8123:8123"
+    volumes:
+      # Mount the current directory to persist book data
+      # This allows books processed on the host to be available in the container
+      - ./:/app
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
